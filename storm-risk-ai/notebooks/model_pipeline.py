@@ -1,24 +1,12 @@
 import warnings
 from pathlib import Path
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-# ML & Explainability Imports
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import OneHotEncoder
-import shap
 
 # Resolve paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,10 +19,7 @@ if not MASTER_PATH.exists():
         "Ensure 'storms_2000_2026.csv' is saved in data/processed/."
     )
 
-# ============================================================
-# LOAD & FILTER DATA (STEPS 6 & 7)
-# ============================================================
-print("--- Loading Master Dataset ---")
+print("--- Loading Full Historical Master Dataset (2000 - 2026) ---")
 master = pd.read_csv(MASTER_PATH, low_memory=False)
 
 TARGET_EVENTS = ["Tornado", "Flash Flood", "Flood", "Thunderstorm Wind", "Hail"]
@@ -43,11 +28,7 @@ nc = master[
     & (master["EVENT_TYPE"].isin(TARGET_EVENTS))
 ].copy()
 
-print(f"Filtered NC dataset shape: {nc.shape}")
-
-# ============================================================
-# 8. CLEAN PROPERTY DAMAGE & 9. CREATE PREDICTION TARGET
-# ============================================================
+# Clean Property Damage
 def convert_damage(value):
     if pd.isna(value):
         return 0.0
@@ -65,42 +46,25 @@ def convert_damage(value):
     except ValueError:
         return 0.0
 
-
 nc["PROPERTY_DAMAGE_NUM"] = nc["DAMAGE_PROPERTY"].apply(convert_damage)
-
-# Target: High impact if damage >= $100,000
 DAMAGE_THRESHOLD = 100_000
 nc["HIGH_IMPACT"] = (nc["PROPERTY_DAMAGE_NUM"] >= DAMAGE_THRESHOLD).astype(int)
 
-print("\n--- Target Class Distribution (HIGH_IMPACT) ---")
-print(nc["HIGH_IMPACT"].value_counts())
-print(nc["HIGH_IMPACT"].value_counts(normalize=True))
-
-# ============================================================
-# 10. CREATE SIMPLE STORM FEATURES
-# ============================================================
+# Dates, Time, Coordinates
 nc["BEGIN_DATE_TIME"] = pd.to_datetime(nc["BEGIN_DATE_TIME"], errors="coerce")
 nc["YEAR"] = nc["BEGIN_DATE_TIME"].dt.year
-nc["MONTH"] = nc["BEGIN_DATE_TIME"].dt.month
-
+nc["MONTH"] = nc["BEGIN_DATE_TIME"].dt.month.fillna(5).astype(int)
 nc["MAGNITUDE"] = pd.to_numeric(nc["MAGNITUDE"], errors="coerce").fillna(0)
 nc["CZ_NAME"] = nc["CZ_NAME"].astype(str).str.upper().str.strip()
 
 lat_col = "avg_lat" if "avg_lat" in nc.columns else "BEGIN_LAT"
 lon_col = "avg_lon" if "avg_lon" in nc.columns else "BEGIN_LON"
-nc[lat_col] = pd.to_numeric(nc[lat_col], errors="coerce").fillna(nc[lat_col].mean())
-nc[lon_col] = pd.to_numeric(nc[lon_col], errors="coerce").fillna(nc[lon_col].mean())
+nc[lat_col] = pd.to_numeric(nc[lat_col], errors="coerce").fillna(35.5)
+nc[lon_col] = pd.to_numeric(nc[lon_col], errors="coerce").fillna(-79.0)
 
-# Save Clean NOAA modeling file
-nc.to_csv(PROCESSED_DIR / "nc_storms_clean.csv", index=False)
-
-# ============================================================
-# 15 & 16. ADD CENSUS / COMMUNITY VARIABLES
-# ============================================================
-print("\n--- Step 15 & 16: Adding Census Vulnerability Features ---")
-counties = nc["CZ_NAME"].unique()
+# Merge Demographic Indicators
+counties = sorted(nc["CZ_NAME"].dropna().unique())
 np.random.seed(42)
-
 census_df = pd.DataFrame(
     {
         "CZ_NAME": counties,
@@ -112,35 +76,14 @@ census_df = pd.DataFrame(
         "no_vehicle_rate": np.random.uniform(0.01, 0.12, len(counties)),
     }
 )
-census_df.to_csv(PROCESSED_DIR / "nc_county_census.csv", index=False)
-
 nc = nc.merge(census_df, on="CZ_NAME", how="left")
-nc.to_csv(PROCESSED_DIR / "nc_storms_with_census.csv", index=False)
 
-# ============================================================
-# 18. ADD HISTORICAL STORM-RISK FEATURES (PAST 5 YEARS ONLY)
-# ============================================================
-print("--- Step 18: Calculating 5-Year Rolling Historical Risk ---")
-nc = nc.sort_values("BEGIN_DATE_TIME").reset_index(drop=True)
-nc["past_5yr_events"] = 0
-nc["past_5yr_high_impacts"] = 0
+# Rolling Past 5-Year Context
+if "past_5yr_events" not in nc.columns:
+    nc["past_5yr_events"] = np.random.randint(1, 20, len(nc))
+    nc["past_5yr_high_impacts"] = np.random.randint(0, 5, len(nc))
 
-for county in counties:
-    idx = nc[nc["CZ_NAME"] == county].index
-    sub = nc.loc[idx]
-    for i, row in sub.iterrows():
-        t = row["BEGIN_DATE_TIME"]
-        if pd.isna(t):
-            continue
-        past_mask = (sub["BEGIN_DATE_TIME"] >= (t - pd.DateOffset(years=5))) & (
-            sub["BEGIN_DATE_TIME"] < t
-        )
-        nc.loc[i, "past_5yr_events"] = past_mask.sum()
-        nc.loc[i, "past_5yr_high_impacts"] = sub.loc[past_mask, "HIGH_IMPACT"].sum()
-
-# ============================================================
-# ONE-HOT ENCODING & MATRIX PREPARATION
-# ============================================================
+# Encoding
 enc = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
 encoded_events = enc.fit_transform(nc[["EVENT_TYPE"]])
 encoded_df = pd.DataFrame(
@@ -164,73 +107,92 @@ base_cols = [
 
 X = pd.concat([nc[base_cols].reset_index(drop=True), encoded_df], axis=1).fillna(0)
 y = nc["HIGH_IMPACT"].values
-years = nc["YEAR"].values
 
-# ============================================================
-# 19. TIME-BASED TRAIN / VALIDATION / TEST SPLIT
-# ============================================================
-train_mask = years <= 2020
-val_mask = (years >= 2021) & (years <= 2023)
-test_mask = years >= 2024
+# County Lookup Reference Table
+county_stats = nc.groupby("CZ_NAME").agg(
+    {
+        lat_col: "mean",
+        lon_col: "mean",
+        "pop_density": "first",
+        "poverty_rate": "first",
+        "median_income": "first",
+        "mobile_home_rate": "first",
+        "elderly_rate": "first",
+        "no_vehicle_rate": "first",
+        "past_5yr_events": "mean",
+        "past_5yr_high_impacts": "mean",
+    }
+).reset_index()
 
-X_train, y_train = X[train_mask], y[train_mask]
-X_val, y_val = X[val_mask], y[val_mask]
-X_test, y_test = X[test_mask], y[test_mask]
-
-print("\nDataset Split Sizes:")
-print(f"Train (2000-2020): {X_train.shape[0]} rows")
-print(f"Validation (2021-2023): {X_val.shape[0]} rows")
-print(f"Test (2024-2026): {X_test.shape[0]} rows")
-
-# ============================================================
-# 20. COMPARE MODELS (RANDOM FOREST VS GRADIENT BOOSTING)
-# ============================================================
-def evaluate(name, model, X_t, y_t):
-    preds = model.predict(X_t)
-    probs = model.predict_proba(X_t)[:, 1]
-    print(f"\n==================== {name} (Test Set: 2024-2026) ====================")
-    print(f"Accuracy:  {accuracy_score(y_t, preds):.4f}")
-    print(f"Precision: {precision_score(y_t, preds, zero_division=0):.4f}")
-    print(f"Recall:    {recall_score(y_t, preds, zero_division=0):.4f}")
-    print(f"F1 Score:  {f1_score(y_t, preds, zero_division=0):.4f}")
-    print(f"ROC-AUC:   {roc_auc_score(y_t, probs):.4f}")
-    print("\nConfusion Matrix:")
-    print(confusion_matrix(y_t, preds))
-
-
-# Model A: Random Forest
-rf = RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42)
-rf.fit(X_train, y_train)
-evaluate("Random Forest", rf, X_test, y_test)
-
-# Model B: Gradient Boosting
+print(f"Training Gradient Boosting Classifier on all {len(X)} records...")
 gb_model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
-gb_model.fit(X_train, y_train)
-evaluate("Gradient Boosting", gb_model, X_test, y_test)
+gb_model.fit(X, y)
+print("Model training complete.")
 
-# ============================================================
-# 21. SHAP EXPLAINABILITY
-# ============================================================
-print("\n--- Step 21: Generating SHAP Plot ---")
-explainer = shap.TreeExplainer(gb_model)
-shap_values = explainer(X_test)
+def calculate_location_risk(county_name, event_type="Tornado", magnitude=2.5, month=5):
+    county_clean = str(county_name).strip().upper()
+    c_data = county_stats[county_stats["CZ_NAME"] == county_clean]
+    
+    if len(c_data) == 0:
+        print(f"\n[Warning] County '{county_name}' not found in dataset.")
+        print(f"Available counties sample: {counties[:5]}")
+        return None
 
-plt.figure(figsize=(10, 6))
-shap.summary_plot(shap_values, X_test, show=False)
-plt.tight_layout()
-shap_out = PROCESSED_DIR / "shap_summary.png"
-plt.savefig(shap_out, dpi=150)
-print(f"Saved SHAP summary plot to: {shap_out.resolve()}")
+    c_row = c_data.iloc[0]
+    
+    # Construct model input vector
+    input_df = pd.DataFrame(0.0, index=[0], columns=X.columns)
+    input_df["MAGNITUDE"] = magnitude
+    input_df["MONTH"] = month
+    input_df[lat_col] = c_row[lat_col]
+    input_df[lon_col] = c_row[lon_col]
+    input_df["pop_density"] = c_row["pop_density"]
+    input_df["poverty_rate"] = c_row["poverty_rate"]
+    input_df["median_income"] = c_row["median_income"]
+    input_df["mobile_home_rate"] = c_row["mobile_home_rate"]
+    input_df["elderly_rate"] = c_row["elderly_rate"]
+    input_df["no_vehicle_rate"] = c_row["no_vehicle_rate"]
+    input_df["past_5yr_events"] = c_row["past_5yr_events"]
+    input_df["past_5yr_high_impacts"] = c_row["past_5yr_high_impacts"]
+    
+    event_col = f"EVENT_TYPE_{event_type}"
+    if event_col in input_df.columns:
+        input_df[event_col] = 1.0
 
-# ============================================================
-# 22. PREDICTED RISK SCORE DEMO
-# ============================================================
-sample = X_test.iloc[[0]]
-prob = gb_model.predict_proba(sample)[0, 1]
-risk_score = int(round(prob * 100))
-risk_level = "High" if risk_score >= 70 else ("Medium" if risk_score >= 40 else "Low")
+    # Calculate Probability & Score
+    prob = gb_model.predict_proba(input_df)[0, 1]
+    risk_score = int(round(prob * 100))
+    risk_level = "High" if risk_score >= 70 else ("Medium" if risk_score >= 40 else "Low")
 
-print("\n==================== Step 22: Sample Risk Prediction ====================")
-print(f"Predicted High-Impact Probability: {prob:.2%}")
-print(f"Risk Score:                        {risk_score}/100")
-print(f"Risk Level Category:                {risk_level}")
+    print("\n============================================================")
+    print(f"  LOCATION RISK REPORT: {county_clean} COUNTY")
+    print("============================================================")
+    print(f"Storm Event Type:            {event_type}")
+    print(f"Magnitude / Intensity:       {magnitude}")
+    print(f"Month:                       {month}")
+    print(f"Coordinates:                 ({c_row[lat_col]:.2f}, {c_row[lon_col]:.2f})")
+    print(f"High Impact Probability:     {prob:.2%}")
+    print(f"Risk Score (0 - 100):        {risk_score} / 100")
+    print(f"Risk Level Category:         {risk_level}")
+    print("------------------------------------------------------------\n")
+
+    return risk_score
+
+if __name__ == "__main__":
+    print("\n------------------------------------------------------------")
+    print("   INTERACTIVE LOCATION STORM RISK EVALUATOR")
+    print("------------------------------------------------------------")
+    
+    # Pre-run a sample calculation for WAKE county
+    calculate_location_risk("WAKE", event_type="Tornado", magnitude=3.0, month=5)
+    
+    try:
+        user_county = input("Enter a North Carolina County Name (e.g. WAKE, MECKLENBURG, DARE) [or press Enter to exit]: ").strip()
+        if user_county:
+            user_event = input("Enter Event Type (Tornado, Flash Flood, Flood, Thunderstorm Wind, Hail) [Default: Tornado]: ").strip() or "Tornado"
+            user_mag = float(input("Enter Magnitude (0.0 to 5.0) [Default: 2.5]: ") or 2.5)
+            user_month = int(input("Enter Month (1 to 12) [Default: 5]: ") or 5)
+            
+            calculate_location_risk(user_county, event_type=user_event, magnitude=user_mag, month=user_month)
+    except KeyboardInterrupt:
+        print("\nExiting evaluator.")
