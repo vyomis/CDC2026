@@ -93,3 +93,15 @@ print("Fatalities:", fatalities.shape)
 print("Master:", master.shape)
 
 print(master.head())
+
+nc = master[master["STATE"] == "NORTH CAROLINA"].copy()
+
+event_types = [
+    "Tornado",
+    "Flash Flood",
+    "Flood",
+    "Thunderstorm Wind",
+    "Hail"
+]
+
+nc = nc[nc["EVENT_TYPE"].isin(event_types)].copy()
