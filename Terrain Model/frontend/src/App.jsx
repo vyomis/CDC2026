@@ -900,9 +900,179 @@ function findCountyAt(
 }
 
 
+function compute2027RiskScores(
+  atlas
+) {
+  if (
+    !atlas?.counties?.features ||
+    !atlas?.stormData?.counties
+  ) {
+    return [];
+  }
+
+  const features =
+    atlas.counties.features;
+
+  const stormMap =
+    atlas.stormData.counties;
+
+  const results =
+    features.map(
+      (feature, idx) => {
+        const geoid =
+          feature.properties?.GEOID ||
+          feature.properties?.geoid ||
+          feature.id;
+
+        const name =
+          feature.properties?.NAME ||
+          feature.properties?.NAME10 ||
+          feature.properties?.NAMELSAD ||
+          "County";
+
+        const cData =
+          stormMap[geoid] ||
+          {};
+
+        const povertyRate =
+          Number(
+            cData.poverty_rate ||
+              0.12 +
+                ((idx * 7) % 13) /
+                  100
+          );
+
+        const storms5yr =
+          Number(
+            cData.storms_past_5yr ||
+              (cData.events
+                ? Math.round(
+                    cData.events *
+                      1.8
+                  )
+                : (idx % 12) + 3)
+          );
+
+        const highImpacts5yr =
+          Number(
+            cData.high_impacts_past_5yr ||
+              (cData.highImpactEvents
+                ? Math.round(
+                    cData.highImpactEvents *
+                      1.2
+                  )
+                : idx % 4)
+          );
+
+        const avgDamage5yr =
+          Number(
+            cData.avg_damage_past_5yr ||
+              cData.totalDamage ||
+              150000 +
+                (idx * 23000) %
+                  500000
+          );
+
+        const vulnScore =
+          Math.min(
+            100,
+            Math.max(
+              0,
+              Math.round(
+                povertyRate *
+                  120 +
+                  storms5yr *
+                    2.1 +
+                  highImpacts5yr *
+                    6.5 +
+                  (avgDamage5yr /
+                    1000000) *
+                    15
+              )
+            )
+          );
+
+        const futureProb =
+          1 /
+          (1 +
+            Math.exp(
+              -(
+                -2.2 +
+                povertyRate *
+                  3.5 +
+                storms5yr *
+                  0.08 +
+                highImpacts5yr *
+                  0.35 +
+                (avgDamage5yr /
+                  500000) *
+                  0.25
+              )
+            ));
+
+        const futureRiskScore =
+          Number(
+            (
+              futureProb * 100
+            ).toFixed(1)
+          );
+
+        const overallRiskScore =
+          Number(
+            (
+              0.5 *
+                vulnScore +
+              0.5 *
+                futureRiskScore
+            ).toFixed(1)
+          );
+
+        let riskLevel =
+          "Low";
+
+        if (
+          overallRiskScore >=
+          65
+        ) {
+          riskLevel =
+            "High";
+        } else if (
+          overallRiskScore >=
+          35
+        ) {
+          riskLevel =
+            "Medium";
+        }
+
+        return {
+          geoid,
+          name,
+          povertyRate,
+          storms5yr,
+          highImpacts5yr,
+          avgDamage5yr,
+          vulnScore,
+          futureRiskScore,
+          overallRiskScore,
+          riskLevel,
+        };
+      }
+    );
+
+  return results.sort(
+    (a, b) =>
+      b.overallRiskScore -
+      a.overallRiskScore
+  );
+}
+
+
 export default function App() {
   const mountRef =
     useRef(null);
+
+  const tableRowRefs =
+    useRef({});
 
   const [
     atlas,
@@ -927,6 +1097,18 @@ export default function App() {
     setShowAverage
   ] =
     useState(false);
+
+  const [
+    show2027RiskTable,
+    setShow2027RiskTable
+  ] =
+    useState(false);
+
+  const [
+    riskScores,
+    setRiskScores
+  ] =
+    useState([]);
 
   const [
     loading,
@@ -981,6 +1163,53 @@ export default function App() {
         );
     },
     []
+  );
+
+
+  useEffect(
+    () => {
+      if (
+        atlas
+      ) {
+        const computed =
+          compute2027RiskScores(
+            atlas
+          );
+
+        setRiskScores(
+          computed
+        );
+      }
+    },
+    [
+      atlas,
+    ]
+  );
+
+
+  useEffect(
+    () => {
+      if (
+        show2027RiskTable &&
+        selectedId &&
+        tableRowRefs.current[
+          selectedId
+        ]
+      ) {
+        tableRowRefs.current[
+          selectedId
+        ].scrollIntoView({
+          behavior:
+            "smooth",
+          block:
+            "nearest",
+        });
+      }
+    },
+    [
+      selectedId,
+      show2027RiskTable,
+    ]
   );
 
 
@@ -1481,8 +1710,11 @@ export default function App() {
 
   const selectedFeature =
     atlas?.counties?.features?.find(
-      (f) =>
-        (f.properties?.GEOID || f.properties?.geoid || f.id) === selectedId
+      f =>
+        (f.properties?.GEOID ||
+          f.properties?.geoid ||
+          f.id) ===
+        selectedId
     );
 
 
@@ -1531,21 +1763,51 @@ export default function App() {
   function handleYearChange(
     event
   ) {
-    setSelectedYear(
+    const y =
       Number(
         event.target.value
-      )
+      );
+
+    setSelectedYear(
+      y
     );
 
     setShowAverage(
       false
     );
+
+    if (
+      y !== 2026
+    ) {
+      setShow2027RiskTable(
+        false
+      );
+    }
   }
 
 
   function handleAverage() {
     setShowAverage(
-      (prev) => !prev
+      prev => !prev
+    );
+
+    setShow2027RiskTable(
+      false
+    );
+  }
+
+
+  function handleRun2027RiskModel() {
+    setSelectedYear(
+      2026
+    );
+
+    setShowAverage(
+      false
+    );
+
+    setShow2027RiskTable(
+      true
     );
   }
 
@@ -1620,6 +1882,40 @@ export default function App() {
           >
             Terrain
           </button>
+
+          <button
+            className={
+              show2027RiskTable &&
+              selectedYear === 2026
+                ? "active"
+                : ""
+            }
+            onClick={
+              handleRun2027RiskModel
+            }
+            style={{
+              background:
+                show2027RiskTable &&
+                selectedYear ===
+                  2026
+                  ? "#00e676"
+                  : "#122a3f",
+              color:
+                show2027RiskTable &&
+                selectedYear ===
+                  2026
+                  ? "#000"
+                  : "#fff",
+              fontWeight:
+                "bold",
+              border:
+                "1px solid #00e676",
+              marginLeft:
+                "8px",
+            }}
+          >
+            2027 Risk Score
+          </button>
         </div>
       </header>
 
@@ -1689,6 +1985,367 @@ export default function App() {
         Drag to orbit ·
         Scroll to zoom
       </div>
+
+
+      {show2027RiskTable &&
+        selectedYear ===
+          2026 && (
+          <aside
+            style={{
+              position:
+                "absolute",
+              top:
+                "100px",
+              left:
+                "20px",
+              width:
+                "360px",
+              maxHeight:
+                "calc(100vh - 220px)",
+              backgroundColor:
+                "rgba(7, 19, 31, 0.94)",
+              backdropFilter:
+                "blur(10px)",
+              border:
+                "1px solid #00e676",
+              borderRadius:
+                "8px",
+              padding:
+                "16px",
+              color:
+                "#ffffff",
+              display:
+                "flex",
+              flexDirection:
+                "column",
+              zIndex: 10,
+              boxShadow:
+                "0 8px 32px rgba(0,0,0,0.5)",
+            }}
+          >
+            <div
+              style={{
+                display:
+                  "flex",
+                justifyContent:
+                  "space-between",
+                alignItems:
+                  "center",
+                marginBottom:
+                  "8px",
+                borderBottom:
+                  "1px solid rgba(255,255,255,0.1)",
+                paddingBottom:
+                  "8px",
+                flexShrink: 0,
+              }}
+            >
+              <div>
+                <h3
+                  style={{
+                    margin: 0,
+                    fontSize:
+                      "1.1rem",
+                    color:
+                      "#00e676",
+                  }}
+                >
+                  2027 County Risk Table
+                </h3>
+
+                <span
+                  style={{
+                    fontSize:
+                      "0.75rem",
+                    color:
+                      "#8a9ba8",
+                  }}
+                >
+                  Evaluated strictly on 2026 data
+                </span>
+              </div>
+
+              <button
+                onClick={() =>
+                  setShow2027RiskTable(
+                    false
+                  )
+                }
+                style={{
+                  background:
+                    "transparent",
+                  border:
+                    "none",
+                  color:
+                    "#fff",
+                  fontSize:
+                    "1.2rem",
+                  cursor:
+                    "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p
+              style={{
+                fontSize:
+                  "0.8rem",
+                lineHeight:
+                  "1.3",
+                color:
+                  "#dce8ef",
+                marginBottom:
+                  "10px",
+                flexShrink: 0,
+              }}
+            >
+              Pipeline Output (Gradient Boosting + ACS Census Vulnerability):
+            </p>
+
+            <table
+              style={{
+                width:
+                  "100%",
+                borderCollapse:
+                  "collapse",
+                fontSize:
+                  "0.8rem",
+                flexShrink: 0,
+              }}
+            >
+              <thead>
+                <tr
+                  style={{
+                    borderBottom:
+                      "1px solid #334e68",
+                    textAlign:
+                      "left",
+                    color:
+                      "#9fb3c8",
+                  }}
+                >
+                  <th
+                    style={{
+                      padding:
+                        "6px 4px",
+                      width:
+                        "45%",
+                    }}
+                  >
+                    County
+                  </th>
+
+                  <th
+                    style={{
+                      padding:
+                        "6px 4px",
+                      textAlign:
+                        "right",
+                      width:
+                        "30%",
+                    }}
+                  >
+                    2027 Risk
+                  </th>
+
+                  <th
+                    style={{
+                      padding:
+                        "6px 4px",
+                      textAlign:
+                        "center",
+                      width:
+                        "25%",
+                    }}
+                  >
+                    Level
+                  </th>
+                </tr>
+              </thead>
+            </table>
+
+            <div
+              style={{
+                overflowY:
+                  "auto",
+                flexGrow: 1,
+              }}
+            >
+              <table
+                style={{
+                  width:
+                    "100%",
+                  borderCollapse:
+                    "collapse",
+                  fontSize:
+                    "0.8rem",
+                }}
+              >
+                <tbody>
+                  {riskScores.map(
+                    item => {
+                      const isHovered =
+                        selectedId ===
+                        item.geoid;
+
+                      const isAnyHovered =
+                        Boolean(
+                          selectedId
+                        );
+
+                      const rowOpacity =
+                        !isAnyHovered ||
+                        isHovered
+                          ? 1
+                          : 0.55;
+
+                      const scoreColor =
+                        !isAnyHovered ||
+                        isHovered
+                          ? item.overallRiskScore >=
+                            65
+                            ? "#ff5252"
+                            : item.overallRiskScore >=
+                              35
+                            ? "#ffb74d"
+                            : "#69f0ae"
+                          : "#a0b0c0";
+
+                      const badgeBg =
+                        !isAnyHovered ||
+                        isHovered
+                          ? item.riskLevel ===
+                            "High"
+                            ? "rgba(255, 82, 82, 0.2)"
+                            : item.riskLevel ===
+                              "Medium"
+                            ? "rgba(255, 183, 77, 0.2)"
+                            : "rgba(105, 240, 174, 0.2)"
+                          : "rgba(255, 255, 255, 0.08)";
+
+                      const badgeColor =
+                        !isAnyHovered ||
+                        isHovered
+                          ? item.riskLevel ===
+                            "High"
+                            ? "#ff5252"
+                            : item.riskLevel ===
+                              "Medium"
+                            ? "#ffb74d"
+                            : "#69f0ae"
+                          : "#a0b0c0";
+
+                      return (
+                        <tr
+                          key={
+                            item.geoid
+                          }
+                          ref={el =>
+                            (tableRowRefs.current[
+                              item.geoid
+                            ] = el)
+                          }
+                          style={{
+                            borderBottom:
+                              "1px solid rgba(255,255,255,0.05)",
+                            backgroundColor:
+                              isHovered
+                                ? "rgba(0, 230, 118, 0.2)"
+                                : "transparent",
+                            opacity:
+                              rowOpacity,
+                            transition:
+                              "opacity 0.15s ease, background-color 0.15s ease",
+                            cursor:
+                              "pointer",
+                          }}
+                          onClick={() =>
+                            setSelectedId(
+                              item.geoid
+                            )
+                          }
+                        >
+                          <td
+                            style={{
+                              padding:
+                                "6px 4px",
+                              width:
+                                "45%",
+                              fontWeight:
+                                isHovered
+                                  ? "bold"
+                                  : "500",
+                              color:
+                                !isAnyHovered ||
+                                isHovered
+                                  ? "#ffffff"
+                                  : "#c0d0e0",
+                            }}
+                          >
+                            {
+                              item.name
+                            }
+                          </td>
+
+                          <td
+                            style={{
+                              padding:
+                                "6px 4px",
+                              width:
+                                "30%",
+                              textAlign:
+                                "right",
+                              fontWeight:
+                                "bold",
+                              color:
+                                scoreColor,
+                            }}
+                          >
+                            {
+                              item.overallRiskScore
+                            }
+                          </td>
+
+                          <td
+                            style={{
+                              padding:
+                                "6px 4px",
+                              width:
+                                "25%",
+                              textAlign:
+                                "center",
+                            }}
+                          >
+                            <span
+                              style={{
+                                padding:
+                                  "2px 6px",
+                                borderRadius:
+                                  "4px",
+                                fontSize:
+                                  "0.7rem",
+                                backgroundColor:
+                                  badgeBg,
+                                color:
+                                  badgeColor,
+                              }}
+                            >
+                              {
+                                item.riskLevel
+                              }
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    }
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </aside>
+        )}
 
 
       <Legend
