@@ -28,21 +28,21 @@ fatalities = pd.concat(
     ignore_index=True
 )
 
-# Save the 3 combined datasets
-#details.to_csv(
-    #"storm-risk-ai/data/processed/details_2000_2025.csv",
-    #index=False
-#)
+#Save the 3 combined datasets
+details.to_csv(
+    "storm-risk-ai/data/processed/details_2000_2025.csv",
+    index=False
+)
 
-#locations.to_csv(
-    #"storm-risk-ai/data/processed/locations_2000_2025.csv",
-    #index=False
-#)
+locations.to_csv(
+    "storm-risk-ai/data/processed/locations_2000_2025.csv",
+    index=False
+)
 
-#fatalities.to_csv(
-    #"storm-risk-ai/data/processed/fatalities_2000_2025.csv",
-    #index=False
-#)
+fatalities.to_csv(
+    "storm-risk-ai/data/processed/fatalities_2000_2025.csv",
+    index=False
+)
 
 # Summarize locations so each EVENT_ID only has one row
 location_summary = (
@@ -81,10 +81,10 @@ master["location_count"] = master["location_count"].fillna(0)
 master["fatality_count"] = master["fatality_count"].fillna(0)
 
 # Save final ML dataset
-#master.to_csv(
-    #"storm-risk-ai/data/processed/storms_master_2000_2025.csv",
-    #index=False
-#)
+master.to_csv(
+    "storm-risk-ai/data/processed/storms_master_2000_2025.csv",
+    index=False
+)
 
 # Check result
 print("Details:", details.shape)
